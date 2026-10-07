@@ -105,7 +105,7 @@ class ContainerTerminalSimulator:
     # ---------------------------------- Simulation -----------------------------------
 
     def _count(self, base, kind, amount=1):
-        """Increase the counter '<base>_<kind>' (kind is 'F' or 'D')."""
+        """Increase the counter."""
         name = f"{base}_{kind}"
         setattr(self, name, getattr(self, name) + amount)
 

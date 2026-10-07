@@ -1,26 +1,180 @@
+import random
+
+import matplotlib.pyplot as plt
 import simpy
 
+# ------------------------------- Model parameters --------------------------------------
+# Assumption: simulation time 0 is Monday 00:00; time is measured in hours.
+ARRIVAL_RATE = 8 / 168  # 8 ships per week, expressed per hour
+P_FEEDER = 0.65
 
+BOOKING_HOURS = 5 * 24  # Task 1 takes five days
+FEE_RANGE = {"F": (4_000, 12_000), "D": (25_000, 60_000)}
+FEE_LIMIT = {"F": 9_000, "D": 50_000}
+P_DIVERT = {"F": 0.30, "D": 0.10}
+
+P_FEEDER_NEEDS_TUG = 0.30
+FEEDER_TOW_HOURS = 6
+DEEPSEA_TOW_MEAN_HOURS = 18
+
+TEAMS = ["alpha", "bravo", "charlie"]
+TEAM_PROBABILITIES = [0.40, 0.35, 0.25]
+UNLOAD_HOURS = {"alpha": 8, "bravo": 11, "charlie": 16}
+P_CHARLIE_RESTACK = 0.25
+P_CHARLIE_FIXES_ITSELF = 0.20
+RESTACK_HOURS = 2
+
+SCAN_HOURS = 4
+P_MINOR = 0.08
+P_MAJOR = 0.02
+MINOR_EXTRA_HOURS = 1
+MAJOR_EXTRA_HOURS = 4
+
+OPEN_HOUR, CLOSE_HOUR = 6, 22  # opening hours, Monday-Saturday
+BARGE_HOUR = 18
+BARGE_SAIL_RANGE = (5, 9)
+
+KIND_NAME = {"F": "feeder", "D": "deepsea"}  # label stored in turnaround_points
+
+
+# ------------------------------- Calendar helpers --------------------------------------
+def is_open_day(day_number):
+    """Monday-Saturday are open (day 0 = Monday), Sunday (day 6) is closed."""
+    return day_number % 7 != 6
+
+
+def time_until_open(now):
+    """Hours to wait until the terminal is open (0 if it is open right now)."""
+    day = int(now // 24)
+    hour = now - day * 24
+    if is_open_day(day):
+        if hour < OPEN_HOUR:
+            return OPEN_HOUR - hour
+        if hour < CLOSE_HOUR:
+            return 0.0
+    next_day = day + 1
+    while not is_open_day(next_day):
+        next_day += 1
+    return next_day * 24 + OPEN_HOUR - now
+
+
+def time_until_barge(now):
+    """Hours until the next barge departure (18:00 on an opening day)."""
+    day = int(now // 24)
+    hour = now - day * 24
+    if is_open_day(day) and hour < BARGE_HOUR:
+        return BARGE_HOUR - hour
+    next_day = day + 1
+    while not is_open_day(next_day):
+        next_day += 1
+    return next_day * 24 + BARGE_HOUR - now
+
+
+# ------------------------------- Exercise 2: KPIs --------------------------------------
 def compute_fraction_ships_diverted(sim, ship_type):
-
-    return "0.00%"
+    """KPI 1 - percentage of quoted ships that were sent to a competing terminal.
+    PATTERN: KPI computed after the run from the counters collected during the
+    simulation (data collection / monitoring) [Slide ??]. The simulator `sim` and the
+    kind are the only inputs (no globals); the counters are read per kind and summed
+    for "all". Returns e.g. "8.68%", or an error text for an unknown kind."""
+    if ship_type == "feeder":
+        quoted, diverted = sim.nr_quoted_ships_F, sim.nr_diverted_ships_F
+    elif ship_type == "deepsea":
+        quoted, diverted = sim.nr_quoted_ships_D, sim.nr_diverted_ships_D
+    elif ship_type == "all":
+        quoted = sim.nr_quoted_ships_F + sim.nr_quoted_ships_D
+        diverted = sim.nr_diverted_ships_F + sim.nr_diverted_ships_D
+    else:
+        return "SHIP TYPE DOES NOT EXIST!"
+    if quoted == 0:  # nothing quoted, avoid dividing by zero
+        return "0.00%"
+    return f"{diverted / quoted * 100:.2f}%"
 
 
 def compute_team_restacking_time(sim, team):
-
-    return 0
+    """KPI 2 - hours a crane team has spent on restacking.
+    PATTERN: accumulator collected during the simulation (data collection /
+    monitoring) [Slide ??]: every finished restacking job adds its duration to the
+    team's total (restacking_hours_<team>); this function only reads the total."""
+    if team == "alpha":
+        return sim.restacking_hours_alpha
+    if team == "bravo":
+        return sim.restacking_hours_bravo
+    if team == "charlie":
+        return sim.restacking_hours_charlie
+    return "TEAM DOES NOT EXIST!"
 
 
 def compute_average_turnaround_time(
     turnaround_points, ship_type="all", start_hour=0.0, end_hour=None
 ):
-
-    return 0
+    """KPI 3 - average turnaround time (confirmed booking -> load at the inland
+    terminal) of the ships ANNOUNCED inside [start_hour, end_hour].
+    PATTERN: time-stamped data collection [Slide ??]: each delivered ship stored
+    (announcement time, turnaround, kind) in `turnaround_points`; here the list is
+    filtered by kind and by announcement window and averaged. end_hour=None means
+    "until the end". Ships still on their way when the simulation ends are not in the
+    list. Returns 0.0 if no ship matches."""
+    if ship_type not in ("feeder", "deepsea", "all"):
+        return "SHIP TYPE DOES NOT EXIST!"
+    times = [
+        turnaround
+        for announced, turnaround, kind in turnaround_points
+        if (ship_type == "all" or kind == ship_type)
+        and announced >= start_hour
+        and (end_hour is None or announced <= end_hour)
+    ]
+    return sum(times) / len(times) if times else 0.0
 
 
 def plot_turnaround_times(turnaround_points, start_hour=0.0, end_hour=None):
+    """KPI 4 - line plot of the turnaround times against the announcement moment
+    (feeder, deep-sea and both combined) and print of the three averages.
+    PATTERN: time series of the collected data (data collection / monitoring)
+    [Slide ??]: the same list of (announcement, turnaround, kind) is split per kind,
+    sorted by announcement time and drawn. Only the parameters are used."""
+    selected = sorted(
+        (
+            point
+            for point in turnaround_points
+            if point[0] >= start_hour and (end_hour is None or point[0] <= end_hour)
+        ),
+        key=lambda point: point[0],
+    )
+    series = {
+        "Feeder": [(a, t) for a, t, kind in selected if kind == "feeder"],
+        "Deep-sea": [(a, t) for a, t, kind in selected if kind == "deepsea"],
+        "Both kinds": [(a, t) for a, t, kind in selected],
+    }
+    # Fixed colour order (categorical slots 1 and 2); the combined line is neutral gray
+    style = {
+        "Feeder": {"color": "#2a78d6", "linewidth": 1.2, "zorder": 3},
+        "Deep-sea": {"color": "#eb6834", "linewidth": 1.2, "zorder": 3},
+        "Both kinds": {"color": "#8a8985", "linewidth": 0.8, "zorder": 2},
+    }
 
-    return None
+    print("\nAverage turnaround time (announcement window "
+          f"{start_hour} - {'end' if end_hour is None else end_hour} h):")
+    figure, axis = plt.subplots(figsize=(11, 5))
+    for name, points in series.items():
+        average = sum(t for _, t in points) / len(points) if points else 0.0
+        print(f"  {name}: {average:.1f} h ({len(points)} ships)")
+        axis.plot(
+            [a for a, _ in points],
+            [t for _, t in points],
+            label=f"{name} (avg {average:.1f} h)",
+            **style[name],
+        )
+    axis.set_xlabel("Announcement moment of the ship (hours)")
+    axis.set_ylabel("Turnaround time (hours)")
+    axis.set_title("Turnaround time per ship: confirmed booking to inland terminal")
+    axis.grid(True, color="#e3e2de", linewidth=0.6)
+    axis.set_axisbelow(True)
+    for side in ("top", "right"):
+        axis.spines[side].set_visible(False)
+    axis.legend(frameon=False)
+    figure.tight_layout()
+    plt.show()
 
 
 class ContainerTerminalSimulator:
@@ -65,9 +219,154 @@ class ContainerTerminalSimulator:
 
     # ---------------------------------- Simulation -----------------------------------
 
+    def _count(self, base, kind, amount=1):
+        """Increase the counter '<base>_<kind>' (kind is 'F' or 'D')."""
+        name = f"{base}_{kind}"
+        setattr(self, name, getattr(self, name) + amount)
+
+    # ---------------------------------- Processes ------------------------------------
+
+    def _arrivals(self, env):
+        """Process 0 - Ship announcements.
+        PATTERN: arrival (generator) process with exponential inter-arrival times,
+        [Slide ??]: loop { timeout(expovariate(rate)); create ship; env.process(ship) }.
+        Ship kind: random branching with probability 65% / 35%  [Slide ??].
+        """
+        while True:
+            yield env.timeout(random.expovariate(ARRIVAL_RATE))
+            kind = "F" if random.random() < P_FEEDER else "D"
+            self._count("nr_arrived_ships", kind)
+            env.process(self._ship(env, kind))
+
+    def _ship(self, env, kind):
+        """One ship = a chain of tasks; the ship stops if the operator refuses.
+        PATTERN: process composition / sequential tasks [Slide ??] (yield from).
+        DATA COLLECTION (exercise 2) [Slide ??]: the announcement moment is stored when
+        the ship process starts, the confirmation moment when task 1 says yes, and when
+        the barge has arrived the triple (announcement, turnaround, kind) is appended to
+        self.turnaround_points. Turnaround = arrival inland - confirmed booking."""
+        announced_at = env.now
+        confirmed = yield from self._task1_book_and_quote(env, kind)
+        if not confirmed:
+            return
+        confirmed_at = env.now
+        yield from self._task2_tow(env, kind)
+        yield from self._task3_unload(env, kind)
+        yield from self._task4_customs(env, kind)
+        yield from self._task5_barge(env, kind)
+        self.turnaround_points.append(
+            (announced_at, env.now - confirmed_at, KIND_NAME[kind])
+        )
+
+    def _task1_book_and_quote(self, env, kind):
+        """Task 1 - Book a berth and quote the fee (5 days, no resource).
+        PATTERNS: timeout for the fixed duration [Slide ??]; uniform random fee
+        [Slide ??]; conditional probabilistic branch (diversion if fee above the limit)
+        [Slide ??]. Returns True if the booking is confirmed."""
+        yield env.timeout(BOOKING_HOURS)
+        fee = random.uniform(*FEE_RANGE[kind])
+        self._count("nr_quoted_ships", kind)
+        self._count("sum_fees", kind, fee)
+        if fee > FEE_LIMIT[kind]:
+            if kind == "F":
+                self.nr_fees_F_above += 1
+            else:
+                self.nr_fees_D_above += 1
+            if random.random() < P_DIVERT[kind]:
+                self._count("nr_diverted_ships", kind)
+                return False
+        return True
+
+    def _task2_tow(self, env, kind):
+        """Task 2 - Tow the ship to the quay (not limited to opening hours).
+        PATTERNS: exponential duration for deep-sea [Slide ??]; optional step
+        (probabilistic branch, task skipped in 70% of the feeder cases) [Slide ??]."""
+        if kind == "D":
+            self._count("nr_towed_ships", kind)
+            yield env.timeout(random.expovariate(1 / DEEPSEA_TOW_MEAN_HOURS))
+        elif random.random() < P_FEEDER_NEEDS_TUG:
+            self._count("nr_towed_ships", kind)
+            yield env.timeout(FEEDER_TOW_HOURS)
+        self._count("nr_docked_ships", kind)
+
+    def _task3_unload(self, env, kind):
+        """Task 3 - Unload the containers with crane team alpha / bravo / charlie.
+        PATTERNS: shared resource with capacity 1 per team (request/release in a
+        'with' block, queue) [Slide ??]; probabilistic choice of the team (40/35/25)
+        [Slide ??]; opening hours: after the team is obtained, wait until the terminal
+        is open, then work without pausing until done [Slide ??]; restacking by team
+        charlie itself keeps its crane, restacking by alpha/bravo is a second request
+        on another resource [Slide ??].
+        DATA COLLECTION (exercise 2) [Slide ??]: every finished restacking job adds its
+        duration to restacking_hours_<team>, which compute_team_restacking_time reads."""
+        team = random.choices(TEAMS, weights=TEAM_PROBABILITIES)[0]
+        helper = None  # alpha/bravo when they have to be called in for restacking
+        with self.teams[team].request() as request:
+            yield request
+            yield env.timeout(time_until_open(env.now))  # may start only when open
+            setattr(self, f"unloading_by_{team}", getattr(self, f"unloading_by_{team}") + 1)
+            yield env.timeout(UNLOAD_HOURS[team])
+            if team == "charlie" and random.random() < P_CHARLIE_RESTACK:
+                self.nr_restacked_ships += 1
+                if random.random() < P_CHARLIE_FIXES_ITSELF:
+                    yield env.timeout(RESTACK_HOURS)  # charlie keeps its crane
+                    self.restacking_by_charlie += 1
+                    self.restacking_hours_charlie += RESTACK_HOURS
+                else:
+                    helper = random.choices(
+                        ["alpha", "bravo"], weights=[TEAM_PROBABILITIES[0], TEAM_PROBABILITIES[1]]
+                    )[0]
+        if helper is not None:
+            with self.teams[helper].request() as request:
+                yield request
+                yield env.timeout(time_until_open(env.now))  # new job: only when open
+                yield env.timeout(RESTACK_HOURS)
+                setattr(self, f"restacking_by_{helper}", getattr(self, f"restacking_by_{helper}") + 1)
+                setattr(
+                    self,
+                    f"restacking_hours_{helper}",
+                    getattr(self, f"restacking_hours_{helper}") + RESTACK_HOURS,
+                )
+        self._count("nr_unloaded_ships", kind)
+
+    def _task4_customs(self, env, kind):
+        """Task 4 - Customs scanning with the single customs team.
+        PATTERNS: shared resource, capacity 1 (queue) [Slide ??]; opening hours as in
+        task 3 [Slide ??]; probabilistic extra work (8% minor / 2% major) [Slide ??];
+        simultaneous use of two resources: the customs team holds its resource and also
+        requests team alpha for the major check [Slide ??]."""
+        with self.customs.request() as request:
+            yield request
+            yield env.timeout(time_until_open(env.now))
+            yield env.timeout(SCAN_HOURS)
+            draw = random.random()
+            if draw < P_MINOR:
+                self.nr_minor_problem += 1
+                yield env.timeout(MINOR_EXTRA_HOURS)
+            elif draw < P_MINOR + P_MAJOR:
+                self.nr_major_problem += 1
+                with self.teams["alpha"].request() as alpha_request:
+                    yield alpha_request
+                    yield env.timeout(MAJOR_EXTRA_HOURS)
+        self._count("nr_scanned_ships", kind)
+
+    def _task5_barge(self, env, kind):
+        """Task 5 - Inland transport by barge (unlimited capacity, not limited to
+        opening hours). PATTERNS: wait for a scheduled time (departure every opening
+        day at 18:00) [Slide ??]; uniform sailing time [Slide ??]."""
+        yield env.timeout(time_until_barge(env.now))
+        yield env.timeout(random.uniform(*BARGE_SAIL_RANGE))
+        self._count("nr_delivered_loads", kind)
+
+    # ---------------------------------- Simulation -----------------------------------
+
     def simulate(self, duration):
         """Simulation function without random seed."""
         env = simpy.Environment()
+        self.teams = {name: simpy.Resource(env, capacity=1) for name in TEAMS}
+        self.customs = simpy.Resource(env, capacity=1)
+        env.process(self._arrivals(env))
+        env.run(until=duration)
         return env
 
 
