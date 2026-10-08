@@ -45,9 +45,9 @@ def time_until_open(now):
     day = int(now // 24)
     hour = now - day * 24
     if is_open_day(day):
-        if hour < OPEN_HOUR: # Closed
+        if hour < OPEN_HOUR:
             return OPEN_HOUR - hour
-        if hour < CLOSE_HOUR: 
+        if hour < CLOSE_HOUR:
             return 0.0
     next_day = day + 1
     while not is_open_day(next_day):
@@ -104,11 +104,6 @@ class ContainerTerminalSimulator:
 
     # ---------------------------------- Simulation -----------------------------------
 
-    def _count(self, base, kind, amount=1):
-        """Increase the counter."""
-        name = f"{base}_{kind}"
-        setattr(self, name, getattr(self, name) + amount)
-
     # ---------------------------------- Processes ------------------------------------
 
     def _arrivals(self, env):
@@ -119,8 +114,14 @@ class ContainerTerminalSimulator:
         """
         while True:
             yield env.timeout(random.expovariate(ARRIVAL_RATE))
-            kind = "F" if random.random() < P_FEEDER else "D"
-            self._count("nr_arrived_ships", kind)
+            if random.random() < P_FEEDER:
+                kind = "F"
+            else:
+                kind = "D"
+            if kind == "F":
+                self.nr_arrived_ships_F += 1
+            else:
+                self.nr_arrived_ships_D += 1
             env.process(self._ship(env, kind))
 
     def _ship(self, env, kind):
@@ -140,16 +141,25 @@ class ContainerTerminalSimulator:
         [Slide ??]; conditional probabilistic branch (diversion if fee above the limit)
         [Slide ??]. Returns True if the booking is confirmed."""
         yield env.timeout(BOOKING_HOURS)
-        fee = random.uniform(*FEE_RANGE[kind])
-        self._count("nr_quoted_ships", kind)
-        self._count("sum_fees", kind, fee)
+        fee = random.uniform(FEE_RANGE[kind][0], FEE_RANGE[kind][1])
+        if kind == "F":
+            self.nr_quoted_ships_F += 1
+        else:
+            self.nr_quoted_ships_D += 1
+        if kind == "F":
+            self.sum_fees_F += fee
+        else:
+            self.sum_fees_D += fee
         if fee > FEE_LIMIT[kind]:
             if kind == "F":
                 self.nr_fees_F_above += 1
             else:
                 self.nr_fees_D_above += 1
             if random.random() < P_DIVERT[kind]:
-                self._count("nr_diverted_ships", kind)
+                if kind == "F":
+                    self.nr_diverted_ships_F += 1
+                else:
+                    self.nr_diverted_ships_D += 1
                 return False
         return True
 
@@ -158,12 +168,21 @@ class ContainerTerminalSimulator:
         PATTERNS: exponential duration for deep-sea [Slide ??]; optional step
         (probabilistic branch, task skipped in 70% of the feeder cases) [Slide ??]."""
         if kind == "D":
-            self._count("nr_towed_ships", kind)
+            if kind == "F":
+                self.nr_towed_ships_F += 1
+            else:
+                self.nr_towed_ships_D += 1
             yield env.timeout(random.expovariate(1 / DEEPSEA_TOW_MEAN_HOURS))
         elif random.random() < P_FEEDER_NEEDS_TUG:
-            self._count("nr_towed_ships", kind)
+            if kind == "F":
+                self.nr_towed_ships_F += 1
+            else:
+                self.nr_towed_ships_D += 1
             yield env.timeout(FEEDER_TOW_HOURS)
-        self._count("nr_docked_ships", kind)
+        if kind == "F":
+            self.nr_docked_ships_F += 1
+        else:
+            self.nr_docked_ships_D += 1
 
     def _task3_unload(self, env, kind):
         """Task 3 - Unload the containers with crane team alpha / bravo / charlie.
@@ -173,12 +192,23 @@ class ContainerTerminalSimulator:
         is open, then work without pausing until done [Slide ??]; resource held while
         working for restacking by team charlie itself; restacking by alpha/bravo is a
         second request on another resource [Slide ??]."""
-        team = random.choices(TEAMS, weights=TEAM_PROBABILITIES)[0]
+        draw = random.random()  # team: 40% alpha, 35% bravo, 25% charlie
+        if draw < TEAM_PROBABILITIES[0]:
+            team = "alpha"
+        elif draw < TEAM_PROBABILITIES[0] + TEAM_PROBABILITIES[1]:
+            team = "bravo"
+        else:
+            team = "charlie"
         helper = None  # alpha/bravo when they have to be called in for restacking
         with self.teams[team].request() as request:
             yield request
             yield env.timeout(time_until_open(env.now))  # may start only when open
-            setattr(self, f"unloading_by_{team}", getattr(self, f"unloading_by_{team}") + 1)
+            if team == "alpha":
+                self.unloading_by_alpha += 1
+            elif team == "bravo":
+                self.unloading_by_bravo += 1
+            else:
+                self.unloading_by_charlie += 1
             yield env.timeout(UNLOAD_HOURS[team])
             if team == "charlie" and random.random() < P_CHARLIE_RESTACK:
                 self.nr_restacked_ships += 1
@@ -186,16 +216,24 @@ class ContainerTerminalSimulator:
                     yield env.timeout(RESTACK_HOURS)  # charlie keeps its crane
                     self.restacking_by_charlie += 1
                 else:
-                    helper = random.choices(
-                        ["alpha", "bravo"], weights=[TEAM_PROBABILITIES[0], TEAM_PROBABILITIES[1]]
-                    )[0]
+                    # alpha or bravo, in proportion 40 : 35
+                    if random.random() * (TEAM_PROBABILITIES[0] + TEAM_PROBABILITIES[1]) < TEAM_PROBABILITIES[0]:
+                        helper = "alpha"
+                    else:
+                        helper = "bravo"
         if helper is not None:
             with self.teams[helper].request() as request:
                 yield request
                 yield env.timeout(time_until_open(env.now))  # new job: only when open
                 yield env.timeout(RESTACK_HOURS)
-                setattr(self, f"restacking_by_{helper}", getattr(self, f"restacking_by_{helper}") + 1)
-        self._count("nr_unloaded_ships", kind)
+                if helper == "alpha":
+                    self.restacking_by_alpha += 1
+                else:
+                    self.restacking_by_bravo += 1
+        if kind == "F":
+            self.nr_unloaded_ships_F += 1
+        else:
+            self.nr_unloaded_ships_D += 1
 
     def _task4_customs(self, env, kind):
         """Task 4 - Customs scanning with the single customs team.
@@ -216,22 +254,30 @@ class ContainerTerminalSimulator:
                 with self.teams["alpha"].request() as alpha_request:
                     yield alpha_request
                     yield env.timeout(MAJOR_EXTRA_HOURS)
-        self._count("nr_scanned_ships", kind)
+        if kind == "F":
+            self.nr_scanned_ships_F += 1
+        else:
+            self.nr_scanned_ships_D += 1
 
     def _task5_barge(self, env, kind):
         """Task 5 - Inland transport by barge (unlimited capacity, not limited to
         opening hours). PATTERNS: wait for a scheduled time (departure every opening
         day at 18:00) [Slide ??]; uniform sailing time [Slide ??]."""
         yield env.timeout(time_until_barge(env.now))
-        yield env.timeout(random.uniform(*BARGE_SAIL_RANGE))
-        self._count("nr_delivered_loads", kind)
+        yield env.timeout(random.uniform(BARGE_SAIL_RANGE[0], BARGE_SAIL_RANGE[1]))
+        if kind == "F":
+            self.nr_delivered_loads_F += 1
+        else:
+            self.nr_delivered_loads_D += 1
 
     # ---------------------------------- Simulation -----------------------------------
 
     def simulate(self, duration):
         """Simulation function without random seed."""
         env = simpy.Environment()
-        self.teams = {name: simpy.Resource(env, capacity=1) for name in TEAMS}
+        self.teams = {}
+        for name in TEAMS:
+            self.teams[name] = simpy.Resource(env, capacity=1)
         self.customs = simpy.Resource(env, capacity=1)
         env.process(self._arrivals(env))
         env.run(until=duration)

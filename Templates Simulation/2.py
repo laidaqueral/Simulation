@@ -115,16 +115,16 @@ def compute_average_turnaround_time(
     filtered by kind and by announcement window and averaged. end_hour=None means
     "until the end". Ships still on their way when the simulation ends are not in the
     list. Returns 0.0 if no ship matches."""
-    if ship_type not in ("feeder", "deepsea", "all"):
+    if ship_type != "feeder" and ship_type != "deepsea" and ship_type != "all":
         return "SHIP TYPE DOES NOT EXIST!"
-    times = [
-        turnaround
-        for announced, turnaround, kind in turnaround_points
-        if (ship_type == "all" or kind == ship_type)
-        and announced >= start_hour
-        and (end_hour is None or announced <= end_hour)
-    ]
-    return sum(times) / len(times) if times else 0.0
+    times = []
+    for announced, turnaround, kind in turnaround_points:
+        if ship_type == "all" or kind == ship_type:
+            if announced >= start_hour and (end_hour is None or announced <= end_hour):
+                times.append(turnaround)
+    if len(times) == 0:
+        return 0.0
+    return sum(times) / len(times)
 
 
 def plot_turnaround_times(turnaround_points, start_hour=0.0, end_hour=None):
@@ -133,38 +133,47 @@ def plot_turnaround_times(turnaround_points, start_hour=0.0, end_hour=None):
     PATTERN: time series of the collected data (data collection / monitoring)
     [Slide ??]: the same list of (announcement, turnaround, kind) is split per kind,
     sorted by announcement time and drawn. Only the parameters are used."""
-    selected = sorted(
-        (
-            point
-            for point in turnaround_points
-            if point[0] >= start_hour and (end_hour is None or point[0] <= end_hour)
-        ),
-        key=lambda point: point[0],
-    )
-    series = {
-        "Feeder": [(a, t) for a, t, kind in selected if kind == "feeder"],
-        "Deep-sea": [(a, t) for a, t, kind in selected if kind == "deepsea"],
-        "Both kinds": [(a, t) for a, t, kind in selected],
-    }
-    # Fixed colour order (categorical slots 1 and 2); the combined line is neutral gray
-    style = {
-        "Feeder": {"color": "#2a78d6", "linewidth": 1.2, "zorder": 3},
-        "Deep-sea": {"color": "#eb6834", "linewidth": 1.2, "zorder": 3},
-        "Both kinds": {"color": "#8a8985", "linewidth": 0.8, "zorder": 2},
-    }
+    selected = []
+    for point in turnaround_points:
+        if point[0] >= start_hour and (end_hour is None or point[0] <= end_hour):
+            selected.append(point)
+    selected = sorted(selected)  # tuples are ordered by their first value: the announcement
 
-    print("\nAverage turnaround time (announcement window "
-          f"{start_hour} - {'end' if end_hour is None else end_hour} h):")
+    feeder_x = []
+    feeder_y = []
+    deepsea_x = []
+    deepsea_y = []
+    both_x = []
+    both_y = []
+    for announced, turnaround, kind in selected:
+        both_x.append(announced)
+        both_y.append(turnaround)
+        if kind == "feeder":
+            feeder_x.append(announced)
+            feeder_y.append(turnaround)
+        else:
+            deepsea_x.append(announced)
+            deepsea_y.append(turnaround)
+
+    # One entry per line: (name, x values, y values, colour, line width, drawing order).
+    # Fixed colour order (categorical slots 1 and 2); the combined line is neutral gray
+    lines = [
+        ("Feeder", feeder_x, feeder_y, "#2a78d6", 1.2, 3),
+        ("Deep-sea", deepsea_x, deepsea_y, "#eb6834", 1.2, 3),
+        ("Both kinds", both_x, both_y, "#8a8985", 0.8, 2),
+    ]
+
+
+    print("\nAverage turnaround time:")
     figure, axis = plt.subplots(figsize=(11, 5))
-    for name, points in series.items():
-        average = sum(t for _, t in points) / len(points) if points else 0.0
-        print(f"  {name}: {average:.1f} h ({len(points)} ships)")
-        axis.plot(
-            [a for a, _ in points],
-            [t for _, t in points],
-            label=f"{name} (avg {average:.1f} h)",
-            **style[name],
-        )
+    for name, xs, ys, color, width, order in lines:
+        if len(ys) > 0:
+            average = sum(ys) / len(ys)
+        else:
+            average = 0.0
+        print(f"  {name}: {average:.1f} h ({len(ys)} ships)")
+        axis.plot(xs, ys, label=f"{name} (avg {average:.1f} h)",
+                  color=color, linewidth=width, zorder=order)
     axis.set_xlabel("Announcement moment of the ship (hours)")
     axis.set_ylabel("Turnaround time (hours)")
     axis.set_title("Turnaround time per ship: confirmed booking to inland terminal")
@@ -219,11 +228,6 @@ class ContainerTerminalSimulator:
 
     # ---------------------------------- Simulation -----------------------------------
 
-    def _count(self, base, kind, amount=1):
-        """Increase the counter '<base>_<kind>' (kind is 'F' or 'D')."""
-        name = f"{base}_{kind}"
-        setattr(self, name, getattr(self, name) + amount)
-
     # ---------------------------------- Processes ------------------------------------
 
     def _arrivals(self, env):
@@ -234,29 +238,34 @@ class ContainerTerminalSimulator:
         """
         while True:
             yield env.timeout(random.expovariate(ARRIVAL_RATE))
-            kind = "F" if random.random() < P_FEEDER else "D"
-            self._count("nr_arrived_ships", kind)
+            if random.random() < P_FEEDER:
+                kind = "F"
+            else:
+                kind = "D"
+            if kind == "F":
+                self.nr_arrived_ships_F += 1
+            else:
+                self.nr_arrived_ships_D += 1
             env.process(self._ship(env, kind))
 
     def _ship(self, env, kind):
         """One ship = a chain of tasks; the ship stops if the operator refuses.
-        PATTERN: process composition / sequential tasks [Slide ??] (yield from).
-        DATA COLLECTION (exercise 2) [Slide ??]: the announcement moment is stored when
-        the ship process starts, the confirmation moment when task 1 says yes, and when
-        the barge has arrived the triple (announcement, turnaround, kind) is appended to
-        self.turnaround_points. Turnaround = arrival inland - confirmed booking."""
+        PATTERN: process composition / sequential tasks [Slide ??] (yield from)."""
+        # EXERCISE 2 (added line) - DATA COLLECTION [Slide ??]: remember the announcement
+        # moment (the ship process starts exactly when the ship is announced).
         announced_at = env.now
         confirmed = yield from self._task1_book_and_quote(env, kind)
         if not confirmed:
             return
+        # EXERCISE 2 (added line): remember the moment the booking is confirmed.
         confirmed_at = env.now
         yield from self._task2_tow(env, kind)
         yield from self._task3_unload(env, kind)
         yield from self._task4_customs(env, kind)
         yield from self._task5_barge(env, kind)
-        self.turnaround_points.append(
-            (announced_at, env.now - confirmed_at, KIND_NAME[kind])
-        )
+        # EXERCISE 2 (added line): store (announcement, turnaround, kind) when the
+        # barge has arrived; turnaround = arrival inland - confirmed booking.
+        self.turnaround_points.append((announced_at, env.now - confirmed_at, KIND_NAME[kind]))
 
     def _task1_book_and_quote(self, env, kind):
         """Task 1 - Book a berth and quote the fee (5 days, no resource).
@@ -264,16 +273,25 @@ class ContainerTerminalSimulator:
         [Slide ??]; conditional probabilistic branch (diversion if fee above the limit)
         [Slide ??]. Returns True if the booking is confirmed."""
         yield env.timeout(BOOKING_HOURS)
-        fee = random.uniform(*FEE_RANGE[kind])
-        self._count("nr_quoted_ships", kind)
-        self._count("sum_fees", kind, fee)
+        fee = random.uniform(FEE_RANGE[kind][0], FEE_RANGE[kind][1])
+        if kind == "F":
+            self.nr_quoted_ships_F += 1
+        else:
+            self.nr_quoted_ships_D += 1
+        if kind == "F":
+            self.sum_fees_F += fee
+        else:
+            self.sum_fees_D += fee
         if fee > FEE_LIMIT[kind]:
             if kind == "F":
                 self.nr_fees_F_above += 1
             else:
                 self.nr_fees_D_above += 1
             if random.random() < P_DIVERT[kind]:
-                self._count("nr_diverted_ships", kind)
+                if kind == "F":
+                    self.nr_diverted_ships_F += 1
+                else:
+                    self.nr_diverted_ships_D += 1
                 return False
         return True
 
@@ -282,52 +300,80 @@ class ContainerTerminalSimulator:
         PATTERNS: exponential duration for deep-sea [Slide ??]; optional step
         (probabilistic branch, task skipped in 70% of the feeder cases) [Slide ??]."""
         if kind == "D":
-            self._count("nr_towed_ships", kind)
+            if kind == "F":
+                self.nr_towed_ships_F += 1
+            else:
+                self.nr_towed_ships_D += 1
             yield env.timeout(random.expovariate(1 / DEEPSEA_TOW_MEAN_HOURS))
         elif random.random() < P_FEEDER_NEEDS_TUG:
-            self._count("nr_towed_ships", kind)
+            if kind == "F":
+                self.nr_towed_ships_F += 1
+            else:
+                self.nr_towed_ships_D += 1
             yield env.timeout(FEEDER_TOW_HOURS)
-        self._count("nr_docked_ships", kind)
+        if kind == "F":
+            self.nr_docked_ships_F += 1
+        else:
+            self.nr_docked_ships_D += 1
 
     def _task3_unload(self, env, kind):
         """Task 3 - Unload the containers with crane team alpha / bravo / charlie.
         PATTERNS: shared resource with capacity 1 per team (request/release in a
         'with' block, queue) [Slide ??]; probabilistic choice of the team (40/35/25)
         [Slide ??]; opening hours: after the team is obtained, wait until the terminal
-        is open, then work without pausing until done [Slide ??]; restacking by team
-        charlie itself keeps its crane, restacking by alpha/bravo is a second request
-        on another resource [Slide ??].
-        DATA COLLECTION (exercise 2) [Slide ??]: every finished restacking job adds its
-        duration to restacking_hours_<team>, which compute_team_restacking_time reads."""
-        team = random.choices(TEAMS, weights=TEAM_PROBABILITIES)[0]
+        is open, then work without pausing until done [Slide ??]; resource held while
+        working for restacking by team charlie itself; restacking by alpha/bravo is a
+        second request on another resource [Slide ??]."""
+        draw = random.random()  # team: 40% alpha, 35% bravo, 25% charlie
+        if draw < TEAM_PROBABILITIES[0]:
+            team = "alpha"
+        elif draw < TEAM_PROBABILITIES[0] + TEAM_PROBABILITIES[1]:
+            team = "bravo"
+        else:
+            team = "charlie"
         helper = None  # alpha/bravo when they have to be called in for restacking
         with self.teams[team].request() as request:
             yield request
             yield env.timeout(time_until_open(env.now))  # may start only when open
-            setattr(self, f"unloading_by_{team}", getattr(self, f"unloading_by_{team}") + 1)
+            if team == "alpha":
+                self.unloading_by_alpha += 1
+            elif team == "bravo":
+                self.unloading_by_bravo += 1
+            else:
+                self.unloading_by_charlie += 1
             yield env.timeout(UNLOAD_HOURS[team])
             if team == "charlie" and random.random() < P_CHARLIE_RESTACK:
                 self.nr_restacked_ships += 1
                 if random.random() < P_CHARLIE_FIXES_ITSELF:
                     yield env.timeout(RESTACK_HOURS)  # charlie keeps its crane
                     self.restacking_by_charlie += 1
+                    # EXERCISE 2 (added line) - DATA COLLECTION [Slide ??]: add the hours
+                    # of every finished restacking job to the team's total.
                     self.restacking_hours_charlie += RESTACK_HOURS
                 else:
-                    helper = random.choices(
-                        ["alpha", "bravo"], weights=[TEAM_PROBABILITIES[0], TEAM_PROBABILITIES[1]]
-                    )[0]
+                    # alpha or bravo, in proportion 40 : 35
+                    if random.random() * (TEAM_PROBABILITIES[0] + TEAM_PROBABILITIES[1]) < TEAM_PROBABILITIES[0]:
+                        helper = "alpha"
+                    else:
+                        helper = "bravo"
         if helper is not None:
             with self.teams[helper].request() as request:
                 yield request
                 yield env.timeout(time_until_open(env.now))  # new job: only when open
                 yield env.timeout(RESTACK_HOURS)
-                setattr(self, f"restacking_by_{helper}", getattr(self, f"restacking_by_{helper}") + 1)
-                setattr(
-                    self,
-                    f"restacking_hours_{helper}",
-                    getattr(self, f"restacking_hours_{helper}") + RESTACK_HOURS,
-                )
-        self._count("nr_unloaded_ships", kind)
+                if helper == "alpha":
+                    self.restacking_by_alpha += 1
+                else:
+                    self.restacking_by_bravo += 1
+                # EXERCISE 2 (added lines): same accumulation for the helper team.
+                if helper == "alpha":
+                    self.restacking_hours_alpha += RESTACK_HOURS
+                else:
+                    self.restacking_hours_bravo += RESTACK_HOURS
+        if kind == "F":
+            self.nr_unloaded_ships_F += 1
+        else:
+            self.nr_unloaded_ships_D += 1
 
     def _task4_customs(self, env, kind):
         """Task 4 - Customs scanning with the single customs team.
@@ -348,22 +394,30 @@ class ContainerTerminalSimulator:
                 with self.teams["alpha"].request() as alpha_request:
                     yield alpha_request
                     yield env.timeout(MAJOR_EXTRA_HOURS)
-        self._count("nr_scanned_ships", kind)
+        if kind == "F":
+            self.nr_scanned_ships_F += 1
+        else:
+            self.nr_scanned_ships_D += 1
 
     def _task5_barge(self, env, kind):
         """Task 5 - Inland transport by barge (unlimited capacity, not limited to
         opening hours). PATTERNS: wait for a scheduled time (departure every opening
         day at 18:00) [Slide ??]; uniform sailing time [Slide ??]."""
         yield env.timeout(time_until_barge(env.now))
-        yield env.timeout(random.uniform(*BARGE_SAIL_RANGE))
-        self._count("nr_delivered_loads", kind)
+        yield env.timeout(random.uniform(BARGE_SAIL_RANGE[0], BARGE_SAIL_RANGE[1]))
+        if kind == "F":
+            self.nr_delivered_loads_F += 1
+        else:
+            self.nr_delivered_loads_D += 1
 
     # ---------------------------------- Simulation -----------------------------------
 
     def simulate(self, duration):
         """Simulation function without random seed."""
         env = simpy.Environment()
-        self.teams = {name: simpy.Resource(env, capacity=1) for name in TEAMS}
+        self.teams = {}
+        for name in TEAMS:
+            self.teams[name] = simpy.Resource(env, capacity=1)
         self.customs = simpy.Resource(env, capacity=1)
         env.process(self._arrivals(env))
         env.run(until=duration)
