@@ -1,3 +1,5 @@
+import random
+
 import simpy
 
 
@@ -6,6 +8,71 @@ SECURITY_ALERT_AFTER_HOURS = 1.0
 SECURITY_CHECK_HOURS = 2.0
 REGULAR_SCAN_HOURS = 4.0
 SECURITY_ALERT_CAUSE = "security alert"
+PAPER_CHECK_RANGE = (1, 3)  # port inspector: uniform 1-3 hours (exercise 4)
+
+# ------------------------------- Model parameters --------------------------------------
+# Assumption: simulation time 0 is Monday 00:00; time is measured in hours.
+ARRIVAL_RATE = 8 / 168  # 8 ships per week, expressed per hour
+P_FEEDER = 0.65
+
+BOOKING_HOURS = 5 * 24  # Task 1 takes five days
+FEE_RANGE = {"F": (4_000, 12_000), "D": (25_000, 60_000)}
+FEE_LIMIT = {"F": 9_000, "D": 50_000}
+P_DIVERT = {"F": 0.30, "D": 0.10}
+
+P_FEEDER_NEEDS_TUG = 0.30
+FEEDER_TOW_HOURS = 6
+DEEPSEA_TOW_MEAN_HOURS = 18
+
+TEAMS = ["alpha", "bravo", "charlie"]
+TEAM_PROBABILITIES = [0.40, 0.35, 0.25]
+UNLOAD_HOURS = {"alpha": 8, "bravo": 11, "charlie": 16}
+P_CHARLIE_RESTACK = 0.25
+P_CHARLIE_FIXES_ITSELF = 0.20
+RESTACK_HOURS = 2
+
+SCAN_HOURS = 4
+P_MINOR = 0.08
+P_MAJOR = 0.02
+MINOR_EXTRA_HOURS = 1
+MAJOR_EXTRA_HOURS = 4
+
+OPEN_HOUR, CLOSE_HOUR = 6, 22  # opening hours, Monday-Saturday
+BARGE_HOUR = 18
+BARGE_SAIL_RANGE = (5, 9)
+
+
+# ------------------------------- Calendar helpers --------------------------------------
+def is_open_day(day_number):
+    """Monday-Saturday are open (day 0 = Monday), Sunday (day 6) is closed."""
+    return day_number % 7 != 6
+
+
+def time_until_open(now):
+    """Hours to wait until the terminal is open (0 if it is open right now)."""
+    day = int(now // 24)
+    hour = now - day * 24
+    if is_open_day(day):
+        if hour < OPEN_HOUR:
+            return OPEN_HOUR - hour
+        if hour < CLOSE_HOUR:
+            return 0.0
+    next_day = day + 1
+    while not is_open_day(next_day):
+        next_day += 1
+    return next_day * 24 + OPEN_HOUR - now
+
+
+def time_until_barge(now):
+    """Hours until the next barge departure (18:00 on an opening day)."""
+    day = int(now // 24)
+    hour = now - day * 24
+    if is_open_day(day) and hour < BARGE_HOUR:
+        return BARGE_HOUR - hour
+    next_day = day + 1
+    while not is_open_day(next_day):
+        next_day += 1
+    return next_day * 24 + BARGE_HOUR - now
 
 
 class ContainerTerminalSimulator:
@@ -47,25 +114,244 @@ class ContainerTerminalSimulator:
         self.nr_interrupted_scans = 0  # Count of routine scans interrupted by an alert.
         self.nr_completed_security_checks = 0  # Count of finished security checks.
 
+    # ---------------------------------- Processes ------------------------------------
+
+    def _arrivals(self, env):
+        """Process 0 - Ship announcements.
+        PATTERN: arrival (generator) process with exponential inter-arrival times,
+        [Slide ??]: loop { timeout(expovariate(rate)); create ship; env.process(ship) }.
+        Ship kind: random branching with probability 65% / 35%  [Slide ??].
+        """
+        while True:
+            yield env.timeout(random.expovariate(ARRIVAL_RATE))
+            if random.random() < P_FEEDER:
+                kind = "F"
+            else:
+                kind = "D"
+            if kind == "F":
+                self.nr_arrived_ships_F += 1
+            else:
+                self.nr_arrived_ships_D += 1
+            env.process(self._ship(env, kind))
+
+    def _ship(self, env, kind):
+        """One ship = a chain of tasks; the ship stops if the operator refuses.
+        PATTERN: process composition / sequential tasks [Slide ??] (yield from)."""
+        confirmed = yield from self._task1_book_and_quote(env, kind)
+        if not confirmed:
+            return
+        yield from self._task2_tow(env, kind)
+        yield from self._task3_unload(env, kind)
+        yield from self._task4_customs(env, kind)
+        yield from self._task5_barge(env, kind)
+
+    def _task1_book_and_quote(self, env, kind):
+        """Task 1 - Book a berth and quote the fee (5 days, no resource).
+        PATTERNS: timeout for the fixed duration [Slide ??]; uniform random fee
+        [Slide ??]; conditional probabilistic branch (diversion if fee above the limit)
+        [Slide ??]. Returns True if the booking is confirmed."""
+        yield env.timeout(BOOKING_HOURS)
+        fee = random.uniform(FEE_RANGE[kind][0], FEE_RANGE[kind][1])
+        if kind == "F":
+            self.nr_quoted_ships_F += 1
+        else:
+            self.nr_quoted_ships_D += 1
+        if kind == "F":
+            self.sum_fees_F += fee
+        else:
+            self.sum_fees_D += fee
+        if fee > FEE_LIMIT[kind]:
+            if kind == "F":
+                self.nr_fees_F_above += 1
+            else:
+                self.nr_fees_D_above += 1
+            if random.random() < P_DIVERT[kind]:
+                if kind == "F":
+                    self.nr_diverted_ships_F += 1
+                else:
+                    self.nr_diverted_ships_D += 1
+                return False
+        return True
+
+    def _task2_tow(self, env, kind):
+        """Task 2 - Tow the ship to the quay (not limited to opening hours).
+        PATTERNS: exponential duration for deep-sea [Slide ??]; optional step
+        (probabilistic branch, task skipped in 70% of the feeder cases) [Slide ??]."""
+        if kind == "D":
+            if kind == "F":
+                self.nr_towed_ships_F += 1
+            else:
+                self.nr_towed_ships_D += 1
+            yield env.timeout(random.expovariate(1 / DEEPSEA_TOW_MEAN_HOURS))
+        elif random.random() < P_FEEDER_NEEDS_TUG:
+            if kind == "F":
+                self.nr_towed_ships_F += 1
+            else:
+                self.nr_towed_ships_D += 1
+            yield env.timeout(FEEDER_TOW_HOURS)
+        if kind == "F":
+            self.nr_docked_ships_F += 1
+        else:
+            self.nr_docked_ships_D += 1
+
+    def _task3_unload(self, env, kind):
+        """Task 3 - Unload the containers with crane team alpha / bravo / charlie.
+        PATTERNS: shared resource with capacity 1 per team (request/release in a
+        'with' block, queue) [Slide ??]; probabilistic choice of the team (40/35/25)
+        [Slide ??]; opening hours: after the team is obtained, wait until the terminal
+        is open, then work without pausing until done [Slide ??]; resource held while
+        working for restacking by team charlie itself; restacking by alpha/bravo is a
+        second request on another resource [Slide ??]."""
+        draw = random.random()  # team: 40% alpha, 35% bravo, 25% charlie
+        if draw < TEAM_PROBABILITIES[0]:
+            team = "alpha"
+        elif draw < TEAM_PROBABILITIES[0] + TEAM_PROBABILITIES[1]:
+            team = "bravo"
+        else:
+            team = "charlie"
+        helper = None  # alpha/bravo when they have to be called in for restacking
+        with self.teams[team].request() as request:
+            yield request
+            yield env.timeout(time_until_open(env.now))  # may start only when open
+            if team == "alpha":
+                self.unloading_by_alpha += 1
+            elif team == "bravo":
+                self.unloading_by_bravo += 1
+            else:
+                self.unloading_by_charlie += 1
+            yield env.timeout(UNLOAD_HOURS[team])
+            if team == "charlie" and random.random() < P_CHARLIE_RESTACK:
+                self.nr_restacked_ships += 1
+                if random.random() < P_CHARLIE_FIXES_ITSELF:
+                    yield env.timeout(RESTACK_HOURS)  # charlie keeps its crane
+                    self.restacking_by_charlie += 1
+                else:
+                    # alpha or bravo, in proportion 40 : 35
+                    if random.random() * (TEAM_PROBABILITIES[0] + TEAM_PROBABILITIES[1]) < TEAM_PROBABILITIES[0]:
+                        helper = "alpha"
+                    else:
+                        helper = "bravo"
+        if helper is not None:
+            with self.teams[helper].request() as request:
+                yield request
+                yield env.timeout(time_until_open(env.now))  # new job: only when open
+                yield env.timeout(RESTACK_HOURS)
+                if helper == "alpha":
+                    self.restacking_by_alpha += 1
+                else:
+                    self.restacking_by_bravo += 1
+        if kind == "F":
+            self.nr_unloaded_ships_F += 1
+        else:
+            self.nr_unloaded_ships_D += 1
+
+    def _task4_customs(self, env, kind):
+        """Task 4 - Customs: container scan and paper check run IN PARALLEL.
+        PATTERNS: parallel processes [Slide ??]: the container scan (customs team) and
+        the paper check (port inspector) are two separate SimPy processes started at the
+        same moment; the ship waits for both with env.all_of([...]), so it is cleared only
+        when the slower one is finished [Slide ??]. Process interruption [Slide ??]: in
+        10% of the scans a third process, the security alert, is started; it interrupts the
+        scan process (see _raise_security_alert and _scan_containers). Event used to
+        synchronise the alert with the real start of the scan: scan_started [Slide ??]."""
+        scan_started = env.event()
+        scan = env.process(
+            self._scan_containers(env, self.customs, self.teams["alpha"], scan_started)
+        )
+        papers = env.process(self._check_papers(env, self.inspector))
+        if random.random() < SECURITY_ALERT_PROBABILITY:
+            env.process(self._raise_security_alert(env, scan, scan_started))
+        yield env.all_of([scan, papers])
+        if kind == "F":
+            self.nr_scanned_ships_F += 1
+        else:
+            self.nr_scanned_ships_D += 1
+
+    def _task5_barge(self, env, kind):
+        """Task 5 - Inland transport by barge (unlimited capacity, not limited to
+        opening hours). PATTERNS: wait for a scheduled time (departure every opening
+        day at 18:00) [Slide ??]; uniform sailing time [Slide ??]."""
+        yield env.timeout(time_until_barge(env.now))
+        yield env.timeout(random.uniform(BARGE_SAIL_RANGE[0], BARGE_SAIL_RANGE[1]))
+        if kind == "F":
+            self.nr_delivered_loads_F += 1
+        else:
+            self.nr_delivered_loads_D += 1
+
     # ---------------------- Parallel and interrupted checks ---------------------------
 
     def _raise_security_alert(self, env, scan_process, scan_started):
-        """Waits for a scan to start and then interrupts its SimPy process."""
-        pass
+        """Waits for a scan to start and then interrupts its SimPy process.
+        PATTERNS: process interruption [Slide ??]: process.interrupt(cause) raises
+        simpy.Interrupt inside the scan process. Waiting for an event [Slide ??]: the alert
+        first waits for scan_started, which the scan triggers when it has really started
+        (customs obtained and terminal open), so time in the queue does not count; then it
+        waits exactly SECURITY_ALERT_AFTER_HOURS (timeout) and interrupts."""
+        yield scan_started
+        yield env.timeout(SECURITY_ALERT_AFTER_HOURS)
+        if scan_process.is_alive:
+            scan_process.interrupt(SECURITY_ALERT_CAUSE)
 
     def _scan_containers(self, env, scanner, alpha, scan_started):
-        """Runs the container scan and handles a possible security interruption."""
-        pass
+        """Runs the container scan and handles a possible security interruption.
+        PATTERNS: shared resource, capacity 1 (queue) [Slide ??]; opening hours as in
+        task 3 [Slide ??]; event triggering: scan_started.succeed() when the scan really
+        starts [Slide ??]; handling an interruption with try / except simpy.Interrupt
+        [Slide ??]: the customs team keeps its resource, performs the secondary security
+        check (2 h) and then the remaining part of the scan (4 h minus the time already
+        scanned); probabilistic extra work (8% minor / 2% major) after the routine scan
+        [Slide ??]; the major check uses the resource of team alpha while the scanner is
+        still held (two resources at the same time) [Slide ??]."""
+        with scanner.request() as request:
+            yield request
+            yield env.timeout(time_until_open(env.now))
+            scan_started.succeed()  # the alert counts its hour from this moment
+            scan_start = env.now
+            try:
+                yield env.timeout(REGULAR_SCAN_HOURS)
+            except simpy.Interrupt as interrupt:
+                if interrupt.cause == SECURITY_ALERT_CAUSE:
+                    already_scanned = env.now - scan_start
+                    self.nr_interrupted_scans += 1
+                    yield env.timeout(SECURITY_CHECK_HOURS)
+                    self.nr_completed_security_checks += 1
+                    yield env.timeout(REGULAR_SCAN_HOURS - already_scanned)
+            self.nr_container_scans += 1  # the routine scan is complete
+            draw = random.random()
+            if draw < P_MINOR:
+                self.nr_minor_problem += 1
+                yield env.timeout(MINOR_EXTRA_HOURS)
+            elif draw < P_MINOR + P_MAJOR:
+                self.nr_major_problem += 1
+                with alpha.request() as alpha_request:
+                    yield alpha_request
+                    yield env.timeout(MAJOR_EXTRA_HOURS)
 
     def _check_papers(self, env, inspector):
-        """Runs the cargo paper check in parallel with the container scan."""
-        pass
+        """Runs the cargo paper check in parallel with the container scan.
+        PATTERNS: shared resource, capacity 1: there is one port inspector (queue)
+        [Slide ??]; uniformly distributed duration between 1 and 3 hours [Slide ??]. It is
+        a separate process, so it runs at the same time as the scan [Slide ??]. The
+        assignment only limits unloading and customs scanning to the opening hours, so
+        the inspector is not limited."""
+        with inspector.request() as request:
+            yield request
+            yield env.timeout(random.uniform(PAPER_CHECK_RANGE[0], PAPER_CHECK_RANGE[1]))
+        self.nr_paper_checks += 1
 
     # ---------------------------------- Simulation -----------------------------------
 
     def simulate(self, duration):
         """Simulation function without random seed."""
         env = simpy.Environment()
+        self.teams = {}
+        for name in TEAMS:
+            self.teams[name] = simpy.Resource(env, capacity=1)
+        self.customs = simpy.Resource(env, capacity=1)
+        # EXERCISE 4 (added line): the single port inspector who checks the cargo papers.
+        self.inspector = simpy.Resource(env, capacity=1)
+        env.process(self._arrivals(env))
+        env.run(until=duration)
         return env
 
 
