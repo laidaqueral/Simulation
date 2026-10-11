@@ -1,13 +1,17 @@
+# TOPIC [Functions, slide 13]: import random (library with pre-defined functions).
 import random
 
+# TOPIC [Simulation, slides 10-11]: the simpy library: Environment, Resource, env.process, env.timeout.
 import simpy
 
 # ------------------------------- Model parameters --------------------------------------
 # Assumption: simulation time 0 is Monday 00:00; time is measured in hours.
+# TOPIC [Variables, Expressions, Types, slides 2-5, 7]: model parameters kept in named variables (constants).
 ARRIVAL_RATE = 8 / 168  # 8 ships per week, expressed per hour
 P_FEEDER = 0.65
 
 BOOKING_HOURS = 5 * 24  # Task 1 takes five days
+# TOPIC [Dictionaries, slides 2-6]: values looked up by key ("F"/"D"); ranges are tuples (Tuples and Sets, slide 2).
 FEE_RANGE = {"F": (4_000, 12_000), "D": (25_000, 60_000)}
 FEE_LIMIT = {"F": 9_000, "D": 50_000}
 P_DIVERT = {"F": 0.30, "D": 0.10}
@@ -16,8 +20,10 @@ P_FEEDER_NEEDS_TUG = 0.30
 FEEDER_TOW_HOURS = 6
 DEEPSEA_TOW_MEAN_HOURS = 18
 
+# TOPIC [Lists, slides 2, 4]: list of the three crane team names.
 TEAMS = ["alpha", "bravo", "charlie"]
 TEAM_PROBABILITIES = [0.40, 0.35, 0.25]
+# TOPIC [Dictionaries, slide 2]: unloading hours per team name (dictionary).
 UNLOAD_HOURS = {"alpha": 8, "bravo": 11, "charlie": 16}
 P_CHARLIE_RESTACK = 0.25
 P_CHARLIE_FIXES_ITSELF = 0.20
@@ -37,19 +43,23 @@ BARGE_SAIL_RANGE = (5, 9)
 # ------------------------------- Calendar helpers --------------------------------------
 def is_open_day(day_number):
     """Monday-Saturday are open (day 0 = Monday), Sunday (day 6) is closed."""
+    # TOPIC [Variables, Expressions, Types, slide 9]: % (modulus) gives the weekday, != is a comparator (Comparators, slide 8).
     return day_number % 7 != 6
 
 
 def time_until_open(now):
     """Hours to wait until the terminal is open (0 if it is open right now)."""
+    # TOPIC [Variables, Expressions, Types, slide 21]: int(...) converts a number to an int; //, - and * are numerical operators (slides 7-8).
     day = int(now // 24)
     hour = now - day * 24
+    # TOPIC [Conditional execution, slides 5, 8-9]: if / return: decide with comparators (Comparators, slides 3-5).
     if is_open_day(day):
         if hour < OPEN_HOUR:
             return OPEN_HOUR - hour
         if hour < CLOSE_HOUR:
             return 0.0
     next_day = day + 1
+    # TOPIC [Iteration, slides 4-6]: while loop: skip days until an open day is found (not: Comparators, slide 16).
     while not is_open_day(next_day):
         next_day += 1
     return next_day * 24 + OPEN_HOUR - now
@@ -59,18 +69,22 @@ def time_until_barge(now):
     """Hours until the next barge departure (18:00 on an opening day)."""
     day = int(now // 24)
     hour = now - day * 24
+    # TOPIC [Comparators, Boolean expressions, slides 11-12]: and: both conditions must be True.
     if is_open_day(day) and hour < BARGE_HOUR:
         return BARGE_HOUR - hour
     next_day = day + 1
+    # TOPIC [Iteration, slides 4-6]: while loop: skip days until an open day is found.
     while not is_open_day(next_day):
         next_day += 1
     return next_day * 24 + BARGE_HOUR - now
 
 
+# TOPIC [Object orientation: introduction, slides 6-7]: class with attributes and methods (self); see also Object orientation: constructors.
 class ContainerTerminalSimulator:
     """A SimPy simulation model for a container terminal handling ships."""
 
     def __init__(self):
+        # TOPIC [Object orientation: constructors, slides 3-5]: the constructor initialises every attribute (counters start at 0).
         # Counters required by the checker
         self.nr_arrived_ships_F = 0  # Count of all announced feeder ships.
         self.nr_arrived_ships_D = 0  # Count of all announced deep-sea ships.
@@ -109,11 +123,14 @@ class ContainerTerminalSimulator:
     def _arrivals(self, env):
         """Process 0 - Ship announcements.
         PATTERN: arrival (generator) process with exponential inter-arrival times,
-        [Slide ??]: loop { timeout(expovariate(rate)); create ship; env.process(ship) }.
-        Ship kind: random branching with probability 65% / 35%  [Slide ??].
+        (Simulation slides 8, 10): loop { timeout(expovariate(rate)); create ship; env.process(ship) }.
+        Ship kind: random branching with probability 65% / 35%  (Simulation slides 24-25).
         """
+        # TOPIC [Iteration, slides 4-5]: while loop; Simulation slides 8, 10: the generator creates ships forever.
         while True:
+            # TOPIC [Simulation, slides 8, 10]: wait for the inter-arrival time (exponential); random: Functions, slide 13.
             yield env.timeout(random.expovariate(ARRIVAL_RATE))
+            # TOPIC [Simulation, slides 24-25, 30]: Choice with a probability (65% / 35%); different case types.
             if random.random() < P_FEEDER:
                 kind = "F"
             else:
@@ -122,12 +139,15 @@ class ContainerTerminalSimulator:
                 self.nr_arrived_ships_F += 1
             else:
                 self.nr_arrived_ships_D += 1
+            # TOPIC [Simulation, slide 10]: start a new process for every ship that arrives.
             env.process(self._ship(env, kind))
 
     def _ship(self, env, kind):
         """One ship = a chain of tasks; the ship stops if the operator refuses.
-        PATTERN: process composition / sequential tasks [Slide ??] (yield from)."""
+        PATTERN: process composition / sequential tasks (Simulation slide 23) (yield from)."""
+        # TOPIC [Simulation, slide 23]: Sequence: the tasks run one after the other.
         confirmed = yield from self._task1_book_and_quote(env, kind)
+        # TOPIC [Conditional execution, slide 5]: if: stop this ship when the booking is not confirmed.
         if not confirmed:
             return
         yield from self._task2_tow(env, kind)
@@ -137,11 +157,14 @@ class ContainerTerminalSimulator:
 
     def _task1_book_and_quote(self, env, kind):
         """Task 1 - Book a berth and quote the fee (5 days, no resource).
-        PATTERNS: timeout for the fixed duration [Slide ??]; uniform random fee
-        [Slide ??]; conditional probabilistic branch (diversion if fee above the limit)
-        [Slide ??]. Returns True if the booking is confirmed."""
+        PATTERNS: timeout for the fixed duration (Simulation slide 27); uniform random fee
+        (Functions slide 13); conditional probabilistic branch (diversion if fee above the limit)
+        (Simulation slide 24). Returns True if the booking is confirmed."""
+        # TOPIC [Simulation, slide 27]: Events: only waiting for time passes (no resource).
         yield env.timeout(BOOKING_HOURS)
+        # TOPIC [Functions, slide 13]: random.uniform; ranges come from a dictionary of tuples (Dictionaries slide 2, Tuples slide 2).
         fee = random.uniform(FEE_RANGE[kind][0], FEE_RANGE[kind][1])
+        # TOPIC [Conditional execution, slide 5]: if / else on the ship type (Simulation slide 30: different case types; Comparators slide 6: ==).
         if kind == "F":
             self.nr_quoted_ships_F += 1
         else:
@@ -150,34 +173,41 @@ class ContainerTerminalSimulator:
             self.sum_fees_F += fee
         else:
             self.sum_fees_D += fee
+        # TOPIC [Comparators, Boolean expressions, slides 3-5]: comparator on the fee; Simulation slide 24: Choice.
         if fee > FEE_LIMIT[kind]:
             if kind == "F":
                 self.nr_fees_F_above += 1
             else:
                 self.nr_fees_D_above += 1
+            # TOPIC [Simulation, slide 24]: Choice: divert with a probability.
             if random.random() < P_DIVERT[kind]:
                 if kind == "F":
                     self.nr_diverted_ships_F += 1
                 else:
                     self.nr_diverted_ships_D += 1
+                # TOPIC [Functions, slide 7]: return gives the result to the caller (False = diverted).
                 return False
         return True
 
     def _task2_tow(self, env, kind):
         """Task 2 - Tow the ship to the quay (not limited to opening hours).
-        PATTERNS: exponential duration for deep-sea [Slide ??]; optional step
-        (probabilistic branch, task skipped in 70% of the feeder cases) [Slide ??]."""
+        PATTERNS: exponential duration for deep-sea (Simulation slide 10); optional step
+        (probabilistic branch, task skipped in 70% of the feeder cases) (Simulation slide 24)."""
+        # TOPIC [Simulation, slide 30]: different case types: deep-sea ships are always towed; Conditional execution slide 9 (elif).
         if kind == "D":
             if kind == "F":
                 self.nr_towed_ships_F += 1
             else:
                 self.nr_towed_ships_D += 1
+            # TOPIC [Simulation, slide 10]: exponential duration.
             yield env.timeout(random.expovariate(1 / DEEPSEA_TOW_MEAN_HOURS))
+        # TOPIC [Simulation, slide 24]: Choice: only some feeders need the tugboat.
         elif random.random() < P_FEEDER_NEEDS_TUG:
             if kind == "F":
                 self.nr_towed_ships_F += 1
             else:
                 self.nr_towed_ships_D += 1
+            # TOPIC [Simulation, slide 27]: Events: waiting for time to pass.
             yield env.timeout(FEEDER_TOW_HOURS)
         if kind == "F":
             self.nr_docked_ships_F += 1
@@ -187,11 +217,12 @@ class ContainerTerminalSimulator:
     def _task3_unload(self, env, kind):
         """Task 3 - Unload the containers with crane team alpha / bravo / charlie.
         PATTERNS: shared resource with capacity 1 per team (request/release in a
-        'with' block, queue) [Slide ??]; probabilistic choice of the team (40/35/25)
-        [Slide ??]; opening hours: after the team is obtained, wait until the terminal
-        is open, then work without pausing until done [Slide ??]; resource held while
+        'with' block, queue) (Simulation slides 28-30); probabilistic choice of the team (40/35/25)
+        (Simulation slide 25); opening hours: after the team is obtained, wait until the terminal
+        is open, then work without pausing until done (Simulation slides 27, 30); resource held while
         working for restacking by team charlie itself; restacking by alpha/bravo is a
-        second request on another resource [Slide ??]."""
+        second request on another resource (Simulation slide 30)."""
+        # TOPIC [Simulation, slide 25]: Choice with three branches: draw once, then if / elif / else.
         draw = random.random()  # team: 40% alpha, 35% bravo, 25% charlie
         if draw < TEAM_PROBABILITIES[0]:
             team = "alpha"
@@ -200,8 +231,11 @@ class ContainerTerminalSimulator:
         else:
             team = "charlie"
         helper = None  # alpha/bravo when they have to be called in for restacking
+        # TOPIC [Simulation, slides 28-30]: request a crane team (Resource, queue); the team comes from a dictionary (Dictionaries slide 2).
         with self.teams[team].request() as request:
+            # TOPIC [Simulation, slides 5, 7]: wait until the resource becomes available.
             yield request
+            # TOPIC [Simulation, slides 27, 30]: resource with limited availability: wait for the opening hour.
             yield env.timeout(time_until_open(env.now))  # may start only when open
             if team == "alpha":
                 self.unloading_by_alpha += 1
@@ -209,7 +243,9 @@ class ContainerTerminalSimulator:
                 self.unloading_by_bravo += 1
             else:
                 self.unloading_by_charlie += 1
+            # TOPIC [Dictionaries, slide 2]: unloading time looked up by team name.
             yield env.timeout(UNLOAD_HOURS[team])
+            # TOPIC [Comparators, Boolean expressions, slides 11-12]: and: both conditions; Simulation slide 24: Choice.
             if team == "charlie" and random.random() < P_CHARLIE_RESTACK:
                 self.nr_restacked_ships += 1
                 if random.random() < P_CHARLIE_FIXES_ITSELF:
@@ -221,7 +257,9 @@ class ContainerTerminalSimulator:
                         helper = "alpha"
                     else:
                         helper = "bravo"
+        # TOPIC [Conditional execution, slide 5]: only call a second team when one is needed.
         if helper is not None:
+            # TOPIC [Simulation, slide 30]: multiple resources: a request on another team.
             with self.teams[helper].request() as request:
                 yield request
                 yield env.timeout(time_until_open(env.now))  # new job: only when open
@@ -237,20 +275,24 @@ class ContainerTerminalSimulator:
 
     def _task4_customs(self, env, kind):
         """Task 4 - Customs scanning with the single customs team.
-        PATTERNS: shared resource, capacity 1 (queue) [Slide ??]; opening hours as in
-        task 3 [Slide ??]; probabilistic extra work (8% minor / 2% major) [Slide ??];
+        PATTERNS: shared resource, capacity 1 (queue) (Simulation slides 28-30); opening hours as in
+        task 3 (Simulation slides 27, 30); probabilistic extra work (8% minor / 2% major) (Simulation slide 25);
         simultaneous use of two resources: the customs team holds its resource and also
-        requests team alpha for the major check [Slide ??]."""
+        requests team alpha for the major check (Simulation slide 30)."""
+        # TOPIC [Simulation, slides 28-30]: the single customs team is a Resource with capacity 1.
         with self.customs.request() as request:
             yield request
             yield env.timeout(time_until_open(env.now))
+            # TOPIC [Simulation, slide 27]: Events: waiting for time to pass.
             yield env.timeout(SCAN_HOURS)
+            # TOPIC [Simulation, slide 25]: Choice: draw once, then if / elif (8% minor, 2% major).
             draw = random.random()
             if draw < P_MINOR:
                 self.nr_minor_problem += 1
                 yield env.timeout(MINOR_EXTRA_HOURS)
             elif draw < P_MINOR + P_MAJOR:
                 self.nr_major_problem += 1
+                # TOPIC [Simulation, slide 30]: two resources at the same time: customs is still held.
                 with self.teams["alpha"].request() as alpha_request:
                     yield alpha_request
                     yield env.timeout(MAJOR_EXTRA_HOURS)
@@ -262,8 +304,10 @@ class ContainerTerminalSimulator:
     def _task5_barge(self, env, kind):
         """Task 5 - Inland transport by barge (unlimited capacity, not limited to
         opening hours). PATTERNS: wait for a scheduled time (departure every opening
-        day at 18:00) [Slide ??]; uniform sailing time [Slide ??]."""
+        day at 18:00) (Simulation slide 27); uniform sailing time (Functions slide 13)."""
+        # TOPIC [Simulation, slide 27]: Events: wait for the departure time.
         yield env.timeout(time_until_barge(env.now))
+        # TOPIC [Functions, slide 13]: random.uniform: sailing time between 5 and 9 hours.
         yield env.timeout(random.uniform(BARGE_SAIL_RANGE[0], BARGE_SAIL_RANGE[1]))
         if kind == "F":
             self.nr_delivered_loads_F += 1
@@ -274,12 +318,18 @@ class ContainerTerminalSimulator:
 
     def simulate(self, duration):
         """Simulation function without random seed."""
+        # TOPIC [Simulation, slide 11]: create the simulation environment.
         env = simpy.Environment()
+        # TOPIC [Dictionaries, slides 3-4]: a dictionary that gets one Resource per team name.
         self.teams = {}
+        # TOPIC [Iteration, slides 9-10]: for loop over the list of team names.
         for name in TEAMS:
             self.teams[name] = simpy.Resource(env, capacity=1)
+        # TOPIC [Simulation, slide 11]: Resource with capacity 1.
         self.customs = simpy.Resource(env, capacity=1)
+        # TOPIC [Simulation, slide 11]: start the arrival process.
         env.process(self._arrivals(env))
+        # TOPIC [Simulation, slide 11]: run the simulation.
         env.run(until=duration)
         return env
 
