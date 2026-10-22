@@ -57,7 +57,7 @@ class DistributionNetwork:
 
     def solve(self):
         # All slide references below are to the Module 7 lecture
-        # "Business Process Optimization" (slide numbers as printed on the slides).
+        # "Business Process Optimization"
         F = self.facilities
         S = self.service_areas
 
